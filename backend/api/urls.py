@@ -8,7 +8,7 @@ from rest_framework_simplejwt.views import (
 )
 
 # Import our views
-from .views import ItemViewSet, ItemImageViewSet, AIAnalysisView, OCRAnalysisView
+from .views import ItemViewSet, ItemImageViewSet, AIAnalysisView, OCRAnalysisView, RegisterView
 
 # Create a router and register our viewsets with it.
 router = DefaultRouter()
@@ -20,6 +20,7 @@ urlpatterns = [
     path('', include(router.urls)),
     path('analyze/', AIAnalysisView.as_view(), name='ai-analyze'),
     path('ocr/', OCRAnalysisView.as_view(), name='ocr-analyze'),
+    path('auth/register/', RegisterView.as_view(), name='auth_register'),
     path('auth/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
 ]

@@ -1,8 +1,9 @@
-from rest_framework import viewsets, permissions, status
+from rest_framework import viewsets, permissions, status, generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from django.contrib.auth.models import User
 from .models import Item, ItemImage
-from .serializers import ItemSerializer, ItemImageSerializer, ItemImageUploadSerializer, AIRequestSerializer, OCRRequestSerializer
+from .serializers import ItemSerializer, ItemImageSerializer, ItemImageUploadSerializer, AIRequestSerializer, OCRRequestSerializer, RegisterSerializer
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.conf import settings
@@ -12,6 +13,12 @@ import requests
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class RegisterView(generics.CreateAPIView):
+    queryset = User.objects.all()
+    permission_classes = (permissions.AllowAny,)
+    serializer_class = RegisterSerializer
 
 
 class ItemViewSet(viewsets.ModelViewSet):

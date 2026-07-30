@@ -1,18 +1,39 @@
 from rest_framework import serializers
 from .models import Item, ItemImage
+from django.contrib.auth.models import User
 
-class ItemSerializer(serializers.ModelSerializer):
+class RegisterSerializer(serializers.ModelSerializer):
     class Meta:
-        model = Item
-        fields = '__all__'
-        read_only_fields = ['created_at', 'updated_at']
+        model = User
+        fields = ('id', 'username', 'email', 'password', 'first_name', 'last_name')
+        extra_kwargs = {
+            'password': {'write_only': True},
+            'email': {'required': True}
+        }
 
+    def create(self, validated_data):
+        user = User.objects.create_user(
+            username=validated_data['username'],
+            email=validated_data['email'],
+            password=validated_data['password'],
+            first_name=validated_data.get('first_name', ''),
+            last_name=validated_data.get('last_name', '')
+        )
+        return user
 
 class ItemImageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ItemImage
         fields = '__all__'
         read_only_fields = ['created_at']
+
+class ItemSerializer(serializers.ModelSerializer):
+    images = ItemImageSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Item
+        fields = '__all__'
+        read_only_fields = ['created_at', 'updated_at']
 
 
 class ItemImageUploadSerializer(serializers.ModelSerializer):
