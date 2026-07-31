@@ -29,9 +29,15 @@ export default function RegisterPage() {
 
     try {
       const { confirm_password, ...submitData } = formData
+      const headers = { "Content-Type": "application/json" }
+      const token = localStorage.getItem("access_token")
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`
+      }
+
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/auth/register/`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(submitData),
       })
 
@@ -139,6 +145,24 @@ export default function RegisterPage() {
                 className="rounded-xl border border-border bg-background/50 px-4 py-2 text-foreground transition-colors focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
                 placeholder="Confirm your password"
               />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-muted-foreground">Role (Default: House Owner)</label>
+              <select
+                name="role"
+                value={formData.role || "house_owner"}
+                onChange={handleChange}
+                className="rounded-xl border border-border bg-background/50 px-4 py-2 text-foreground transition-colors focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
+              >
+                <option value="house_owner">House Owner</option>
+                <option value="sts_manager">STS Manager</option>
+                <option value="area_head">Area Head</option>
+                <option value="driver">Driver</option>
+                <option value="landfill_manager">Landfill Manager</option>
+                <option value="truck_owner">Truck Owner</option>
+                <option value="admin">Admin</option>
+              </select>
             </div>
 
             <button
