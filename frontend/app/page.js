@@ -1,4 +1,5 @@
 import Image from "next/image"
+import Link from "next/link"
 import {
   Zap,
   BookOpen,
@@ -211,12 +212,20 @@ function Header() {
             </a>
           ))}
         </nav>
-        <a
-          href="#download"
-          className="glow-brand rounded-full bg-brand px-5 py-2.5 text-sm font-semibold text-brand-foreground transition-transform hover:scale-105"
-        >
-          Download App
-        </a>
+        <div className="flex items-center gap-4">
+          <Link
+            href="/login"
+            className="text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground"
+          >
+            Log In
+          </Link>
+          <Link
+            href="/register"
+            className="glow-brand rounded-full bg-brand px-5 py-2.5 text-sm font-semibold text-brand-foreground transition-transform hover:scale-105"
+          >
+            Sign Up
+          </Link>
+        </div>
       </div>
     </header>
   )
