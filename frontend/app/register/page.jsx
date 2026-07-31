@@ -3,7 +3,9 @@
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Loader2 } from "lucide-react"
+import { ArrowLeft, Loader2, Recycle } from "lucide-react"
+import { API_BASE_URL, ROLES } from "@/utils/constants"
+import { dashboardRouteForRole, setTokens, setStoredUser } from "@/utils/helpers"
 
 export default function RegisterPage() {
   const [formData, setFormData] = useState({
@@ -11,6 +13,7 @@ export default function RegisterPage() {
     email: "",
     password: "",
     confirm_password: "",
+    role: "house_owner",
   })
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
@@ -19,7 +22,7 @@ export default function RegisterPage() {
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError("")
-    
+
     if (formData.password !== formData.confirm_password) {
       setError("Passwords do not match")
       return
@@ -28,8 +31,8 @@ export default function RegisterPage() {
     setLoading(true)
 
     try {
-      const { confirm_password, ...submitData } = formData
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/auth/register/`, {
+      const { confirm_password, role, ...submitData } = formData
+      const res = await fetch(`${API_BASE_URL}/auth/register/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(submitData),
@@ -40,8 +43,7 @@ export default function RegisterPage() {
         throw new Error(Object.values(data).flat()[0] || "Registration failed")
       }
 
-      // Auto login after registration
-      const loginRes = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/auth/token/`, {
+      const loginRes = await fetch(`${API_BASE_URL}/auth/token/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: formData.username, password: formData.password }),
@@ -49,9 +51,9 @@ export default function RegisterPage() {
 
       if (loginRes.ok) {
         const loginData = await loginRes.json()
-        localStorage.setItem("access_token", loginData.access)
-        localStorage.setItem("refresh_token", loginData.refresh)
-        router.push("/admin")
+        setTokens(loginData)
+        setStoredUser({ role, name: formData.username })
+        router.push(dashboardRouteForRole(role))
       } else {
         router.push("/login")
       }
@@ -68,18 +70,20 @@ export default function RegisterPage() {
 
   return (
     <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-5 py-10">
-      {/* Background decorations */}
       <div className="pointer-events-none absolute -left-24 top-24 h-80 w-80 rounded-full bg-brand/20 blur-3xl" />
       <div className="pointer-events-none absolute -right-16 bottom-24 h-80 w-80 rounded-full bg-mint/10 blur-3xl" />
-      
-      <div className="w-full max-w-md animate-floaty focus-within:[animation-play-state:paused] hover:[animation-play-state:paused]" style={{ animationDuration: '9s' }}>
+
+      <div className="w-full max-w-md animate-floaty focus-within:[animation-play-state:paused] hover:[animation-play-state:paused]" style={{ animationDuration: "9s" }}>
         <Link href="/" className="mb-6 inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground">
           <ArrowLeft className="h-4 w-4" /> Back to home
         </Link>
         <div className="ring-gradient glass rounded-[2rem] border border-border bg-card/50 p-8 shadow-2xl backdrop-blur-xl sm:p-10">
           <div className="mb-8 text-center">
+            <span className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-brand to-mint shadow-lg shadow-brand/20">
+              <Recycle className="h-6 w-6 text-white" />
+            </span>
             <h1 className="text-3xl font-extrabold tracking-tight">Create an account</h1>
-            <p className="mt-2 text-sm text-muted-foreground">Join us to start building your web3 project</p>
+            <p className="mt-2 text-sm text-muted-foreground">Join EcoNexus smart waste management</p>
           </div>
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
@@ -88,7 +92,23 @@ export default function RegisterPage() {
                 {error}
               </div>
             )}
-            
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium text-muted-foreground">I am a *</label>
+              <select
+                name="role"
+                value={formData.role}
+                onChange={handleChange}
+                className="rounded-xl border border-border bg-background/50 px-4 py-2 text-foreground transition-colors focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
+              >
+                {Object.entries(ROLES).map(([key, value]) => (
+                  <option key={key} value={key}>
+                    {value.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <div className="flex flex-col gap-1.5">
               <label className="text-sm font-medium text-muted-foreground">Username *</label>
               <input
@@ -101,7 +121,7 @@ export default function RegisterPage() {
                 placeholder="Choose a username"
               />
             </div>
-            
+
             <div className="flex flex-col gap-1.5">
               <label className="text-sm font-medium text-muted-foreground">Email Address *</label>
               <input
