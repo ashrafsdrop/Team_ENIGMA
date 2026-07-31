@@ -377,11 +377,73 @@ class WasteCollectionRequestViewSet(viewsets.ModelViewSet):
 
 class STSViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    A viewset for viewing STS.
+    A viewset for viewing STS and running AI predictions.
     """
     queryset = STS.objects.all()
     serializer_class = STSSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=True, methods=['get'], permission_classes=[permissions.IsAuthenticated])
+    def predict_capacity(self, request, pk=None):
+        sts = self.get_object()
+        
+        # Gather live data for prompt
+        active_vans = sts.vans.count()
+        vans_collecting = sts.vans.filter(status='collecting').count()
+        vans_returning = sts.vans.filter(status='returning').count()
+        
+        pending_waste = WasteCollectionRequest.objects.filter(area=sts.area, status='pending')
+        pending_weight_kg = sum(req.weight for req in pending_waste)
+        
+        prompt = f"""
+        You are an intelligent logistics AI for a city waste management system. 
+        Analyze the following Secondary Transfer Station (STS) data and predict when a truck needs to be dispatched.
+        
+        STS Name: {sts.name}
+        Total Capacity: {sts.capacity_tonnes} tonnes
+        Current Fill: {sts.current_fill_tonnes} tonnes
+        Time since last collection: {sts.last_collected or 'Never'}
+        
+        Local Fleet Activity:
+        Total Vans Assigned: {active_vans}
+        Vans currently out collecting: {vans_collecting}
+        Vans currently returning full of waste: {vans_returning}
+        Total known pending waste waiting at houses in this area: {pending_weight_kg} kg
+        
+        Based on this live data, output a pure JSON object (no markdown formatting, no backticks, just the raw JSON string) with exactly these 4 keys:
+        - "estimated_hours_until_full" (float, estimated hours based on current load and inbound vans)
+        - "should_dispatch_truck_now" (boolean, true if they should request a truck immediately to prevent overflow)
+        - "recommended_truck_tonnes" (float, how many tonnes they should request to clear space)
+        - "reasoning" (string, a brief 1-sentence explanation of your decision)
+        """
+        
+        try:
+            import requests
+            import json
+            gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
+            headers = {
+                'Content-Type': 'application/json',
+                'X-goog-api-key': settings.GEMINI_API_KEY
+            }
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}]
+            }
+            
+            response = requests.post(gemini_url, headers=headers, json=payload)
+            response.raise_for_status()
+            
+            response_data = response.json()
+            result_text = response_data['candidates'][0]['content']['parts'][0]['text']
+            
+            # Clean up markdown if Gemini ignores instructions
+            result_text = result_text.replace('```json', '').replace('```', '').strip()
+            
+            prediction = json.loads(result_text)
+            return Response(prediction, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Gemini Prediction Error: {e}")
+            return Response({"error": "Failed to generate AI prediction."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class VanViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -634,4 +696,61 @@ class WasteTransferViewSet(viewsets.ModelViewSet):
         suggestions.sort(key=lambda x: x['estimated_fuel_liters'])
         
         return Response(suggestions, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], permission_classes=[permissions.IsAuthenticated])
+    def my_mission(self, request):
+        user = request.user
+        if not hasattr(user, 'profile') or user.profile.role != 'truck_owner':
+            return Response({"error": "Only truck drivers can fetch missions."}, status=status.HTTP_403_FORBIDDEN)
+            
+        if not hasattr(user, 'truck'):
+            return Response({"error": "No truck assigned to your profile."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        # Get active transfer for this truck
+        active_transfer = WasteTransfer.objects.filter(
+            truck=user.truck, 
+            status__in=['truck_assigned', 'in_transit']
+        ).first()
+        
+        if not active_transfer:
+            return Response({"message": "No active mission right now.", "mission": None}, status=status.HTTP_200_OK)
+            
+        distance_km = haversine(
+            active_transfer.sts.latitude, 
+            active_transfer.sts.longitude, 
+            active_transfer.truck.landfill.latitude, 
+            active_transfer.truck.landfill.longitude
+        )
+            
+        serializer = self.get_serializer(active_transfer)
+        data = serializer.data
+        data['distance_km'] = round(distance_km, 2)
+        
+        return Response({"mission": data}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def arrived_at_sts(self, request, pk=None):
+        transfer = self.get_object()
+        
+        if transfer.status != 'truck_assigned':
+            return Response({"error": "Transfer must be in truck_assigned state."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        truck = transfer.truck
+        if not truck:
+            return Response({"error": "No truck assigned to this transfer."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        # Update truck status
+        truck.status = 'loading'
+        truck.save()
+        
+        # Notify STS Manager
+        sts_manager = transfer.sts.manager
+        if sts_manager:
+            Notification.objects.create(
+                user=sts_manager,
+                title="Heavy Truck Arrived",
+                message=f"Truck {truck.registration_number} has arrived at the gate for Transfer #{transfer.id}. Ready for loading and dispatch."
+            )
+            
+        return Response({"message": "Arrived at STS successfully. Status updated to loading."}, status=status.HTTP_200_OK)
 
