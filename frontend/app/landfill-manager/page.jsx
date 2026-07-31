@@ -35,13 +35,15 @@ export default function LandfillManagerDashboard() {
   const [trucks, setTrucks] = useState([])
   const [transfers, setTransfers] = useState([])
   const [selectedTruckForRequest, setSelectedTruckForRequest] = useState({})
+  const [suggestionsMap, setSuggestionsMap] = useState({})
+  const [suggestionsLoading, setSuggestionsLoading] = useState({})
 
   const fetchData = async () => {
     try {
       setLoading(true)
       
       // 1. Get Landfill
-      const lfData = await apiRequest("/landfills/")
+      const lfData = await apiRequest("/landfills/", { auth: true })
       if (!lfData || lfData.length === 0) {
         setLoading(false)
         return
@@ -50,16 +52,16 @@ export default function LandfillManagerDashboard() {
       setLandfill(myLf)
 
       // 2. Get Trucks
-      const allTrucks = await apiRequest("/trucks/")
+      const allTrucks = await apiRequest("/trucks/", { auth: true })
       const myTrucks = allTrucks.filter(t => t.landfill === myLf.id)
       setTrucks(myTrucks)
 
       // 3. Get STS List
-      const allSts = await apiRequest("/sts/")
+      const allSts = await apiRequest("/sts/", { auth: true })
       setStsList(allSts)
 
       // 4. Get Waste Transfers
-      const allTransfers = await apiRequest("/waste-transfers/")
+      const allTransfers = await apiRequest("/waste-transfers/", { auth: true })
       setTransfers(allTransfers.reverse())
 
       // Calc stats
@@ -91,8 +93,9 @@ export default function LandfillManagerDashboard() {
     
     try {
       await apiRequest(`/waste-transfers/${transferId}/assign_truck/`, {
-         method: "POST",
-         body: { truck_id: parseInt(truckId) }
+        method: "POST",
+        body: { truck_id: parseInt(truckId) },
+        auth: true,
       })
       setNotice(`Assigned Truck to transfer #${transferId}`)
       fetchData()
@@ -101,13 +104,27 @@ export default function LandfillManagerDashboard() {
       setNotice(e.data?.error || "Failed to assign truck")
     }
   }
+
+  const fetchSuggestions = async (transferId) => {
+    try {
+      setSuggestionsLoading((s) => ({ ...s, [transferId]: true }))
+      const res = await apiRequest(`/waste-transfers/${transferId}/suggest_trucks/`, { auth: true })
+      setSuggestionsMap((s) => ({ ...s, [transferId]: res }))
+    } catch (e) {
+      console.error('Failed to fetch suggestions', e)
+      setSuggestionsMap((s) => ({ ...s, [transferId]: [] }))
+    } finally {
+      setSuggestionsLoading((s) => ({ ...s, [transferId]: false }))
+    }
+  }
   
   const receiveTruck = async (transferId, expectedLoad) => {
     try {
       // In a real app, a weight bridge would measure this. Here we simulate.
       await apiRequest(`/waste-transfers/${transferId}/receive_truck/`, {
-         method: "POST",
-         body: { weight_arriving_landfill: expectedLoad }
+        method: "POST",
+        body: { weight_arriving_landfill: expectedLoad },
+        auth: true,
       })
       setNotice(`Truck arrived and weight verified for transfer #${transferId}`)
       fetchData()
@@ -120,8 +137,9 @@ export default function LandfillManagerDashboard() {
   const dispatchTruck = async (transferId, requestedTonnes) => {
     try {
       await apiRequest(`/waste-transfers/${transferId}/dispatch_truck/`, {
-         method: "POST",
-         body: { weight_leaving_sts: requestedTonnes }
+        method: "POST",
+        body: { weight_leaving_sts: requestedTonnes },
+        auth: true,
       })
       setNotice(`Truck dispatched back to Landfill for transfer #${transferId}`)
       fetchData()
@@ -199,7 +217,7 @@ export default function LandfillManagerDashboard() {
                     <div className="h-1.5 bg-[#1a1a2e] rounded-full overflow-hidden">
                       <div
                         className={`h-full rounded-full transition-all duration-500 ${fillPercent > 85 ? "bg-[#ff6b6b]" : fillPercent > 70 ? "bg-[#fdcb6e]" : "bg-[#00d4aa]"}`}
-                        style={{ width: \`\${Math.min(fillPercent, 100)}%\` }}
+                        style={{ width: `${Math.min(fillPercent, 100)}%` }}
                       />
                     </div>
                   </div>
@@ -277,6 +295,12 @@ export default function LandfillManagerDashboard() {
                       >
                         <CheckCircle className="w-3 h-3" /> Assign Truck
                       </button>
+                      <button
+                        onClick={() => fetchSuggestions(r.id)}
+                        className="flex items-center gap-1 bg-[#6c5ce7] text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#6c5ce7]/80 transition-colors"
+                      >
+                        Suggest Trucks
+                      </button>
                     </div>
                   )}
 
@@ -297,11 +321,33 @@ export default function LandfillManagerDashboard() {
                         <ArrowRight className="w-3 h-3" /> Mark Arrived & Verify
                       </button>
                   )}
+                  {suggestionsMap[r.id] && suggestionsMap[r.id].length > 0 && (
+                    <div className="mt-2 w-full bg-[#0b0b10] border border-[#222233] rounded-lg p-2">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs text-[#8888aa]">Suggested Trucks</span>
+                        <span className="text-[10px] text-[#55557a]">Sorted by fuel</span>
+                      </div>
+                      {suggestionsMap[r.id].slice(0,3).map((sug) => (
+                        <div key={sug.truck_id} className="flex items-center justify-between p-2 rounded-lg hover:bg-[#0a0a0f]">
+                          <div className="text-xs">
+                            <div className="font-medium text-[#e8e8f0]">{sug.registration_number} · {sug.capacity_tonnes}t</div>
+                            <div className="text-[10px] text-[#8888aa]">Fuel est: {sug.estimated_fuel_liters}L · {sug.distance_km}km</div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button onClick={() => assignTruck(r.id, sug.truck_id)} className="text-xs bg-[#00d4aa] text-black px-2 py-1 rounded-lg">Assign</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {suggestionsLoading[r.id] && (
+                    <div className="text-xs text-[#8888aa] mt-2">Loading suggestions…</div>
+                  )}
                   
                   {["truck_assigned", "received", "flagged"].includes(r.status) && (
-                     <span className="text-xs text-[#e8e8f0] font-medium">
-                        Truck: {r.truck_reg || "N/A"}
-                     </span>
+                    <span className="text-xs text-[#e8e8f0] font-medium">
+                      Truck: {(trucks.find(t => t.id === r.truck) || {}).registration_number || r.truck_reg || "N/A"}
+                    </span>
                   )}
                 </div>
               </div>

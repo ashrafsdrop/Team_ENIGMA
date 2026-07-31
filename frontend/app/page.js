@@ -58,8 +58,8 @@ const roles = [
   { key: "house_owner", icon: Home, blurb: "Request pickups, pay bills, earn rewards." },
   { key: "sts_manager", icon: Warehouse, blurb: "Run the transfer station and dispatch." },
   { key: "landfill_manager", icon: Leaf, blurb: "Disposal, cells, emissions and reports." },
-  { key: "truck_driver", icon: Route, blurb: "STS-to-landfill haulage and fuel logs." },
-  { key: "van_driver", icon: ClipboardCheck, blurb: "Door-to-door collection in your area." },
+  { key: "truck_owner", icon: Route, blurb: "STS-to-landfill haulage and fuel logs." },
+  { key: "driver", icon: ClipboardCheck, blurb: "Door-to-door collection in your area." },
 ]
 
 const highlights = [
