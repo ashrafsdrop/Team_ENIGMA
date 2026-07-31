@@ -8,7 +8,7 @@ from rest_framework_simplejwt.views import (
 )
 
 # Import our views
-from .views import ItemViewSet, ItemImageViewSet, AIAnalysisView, RegisterView, WasteCollectionRequestViewSet, WasteTypeViewSet, STSViewSet, VanViewSet, DumpRequestViewSet
+from .views import ItemViewSet, ItemImageViewSet, AIAnalysisView, RegisterView, WasteCollectionRequestViewSet, WasteTypeViewSet, STSViewSet, VanViewSet, DumpRequestViewSet, NotificationViewSet, WasteTransferViewSet
 
 # Create a router and register our viewsets with it.
 router = DefaultRouter()
@@ -19,6 +19,8 @@ router.register(r'waste-types', WasteTypeViewSet, basename='waste-type')
 router.register(r'sts', STSViewSet, basename='sts')
 router.register(r'vans', VanViewSet, basename='van')
 router.register(r'dump-requests', DumpRequestViewSet, basename='dump-request')
+router.register(r'notifications', NotificationViewSet, basename='notification')
+router.register(r'waste-transfers', WasteTransferViewSet, basename='waste-transfer')
 
 # The API URLs are now determined automatically by the router.
 urlpatterns = [

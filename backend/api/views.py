@@ -3,8 +3,9 @@ from rest_framework.decorators import action
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.contrib.auth.models import User
-from .models import Item, ItemImage, WasteCollectionRequest, WasteType, STS, Van, DumpRequest
-from .serializers import ItemSerializer, ItemImageSerializer, ItemImageUploadSerializer, AIRequestSerializer, RegisterSerializer, WasteCollectionRequestSerializer, WasteTypeSerializer, STSSerializer, VanSerializer, DumpRequestSerializer
+from django.utils import timezone
+from .models import Item, ItemImage, WasteCollectionRequest, WasteType, STS, Van, DumpRequest, Notification, Truck, WasteTransfer
+from .serializers import ItemSerializer, ItemImageSerializer, ItemImageUploadSerializer, AIRequestSerializer, RegisterSerializer, WasteCollectionRequestSerializer, WasteTypeSerializer, STSSerializer, VanSerializer, DumpRequestSerializer, NotificationSerializer, WasteTransferSerializer
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.conf import settings
@@ -12,10 +13,18 @@ import base64
 import json
 import requests
 import logging
+import math
+from .models import Area
 
 logger = logging.getLogger(__name__)
 
-
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371  # Earth radius in kilometers
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2) * math.sin(dlat/2) + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2) * math.sin(dlon/2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    return R * c
 class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     permission_classes = (permissions.AllowAny,)
@@ -227,6 +236,17 @@ class WasteCollectionRequestViewSet(viewsets.ModelViewSet):
                 waste_request.waste_type = wt
                 waste_request.weight = estimated_weight
                 waste_request.description = description
+                
+                # Auto-assign Area based on coordinates
+                closest_area = None
+                min_distance = float('inf')
+                for area in Area.objects.all():
+                    dist = haversine(waste_request.latitude, waste_request.longitude, area.latitude, area.longitude)
+                    if dist <= area.radius_km and dist < min_distance:
+                        min_distance = dist
+                        closest_area = area
+                
+                waste_request.area = closest_area
                 waste_request.save()
                 
             except Exception as e:
@@ -235,8 +255,13 @@ class WasteCollectionRequestViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         # Users can only see their own requests, unless they are admin/sts_manager etc.
         user = self.request.user
-        if user.is_staff or (hasattr(user, 'profile') and user.profile.role in ['admin', 'sts_manager', 'area_head', 'driver']):
+        if user.is_staff or (hasattr(user, 'profile') and user.profile.role in ['admin', 'sts_manager', 'area_head']):
             return WasteCollectionRequest.objects.all()
+        if hasattr(user, 'profile') and user.profile.role == 'driver':
+            # Drivers only see requests in their assigned STS area
+            if hasattr(user, 'van') and user.van.sts.area:
+                return WasteCollectionRequest.objects.filter(area=user.van.sts.area)
+            return WasteCollectionRequest.objects.none()
         return WasteCollectionRequest.objects.filter(user=user)
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
@@ -265,8 +290,15 @@ class WasteCollectionRequestViewSet(viewsets.ModelViewSet):
         if waste_request.status != 'pending':
             return Response({"error": "This request is no longer pending."}, status=status.HTTP_400_BAD_REQUEST)
         
-        # Update van load
+        # Update van load and status
         van.current_load_kg += waste_request.weight
+        
+        # If van is near capacity (e.g. > 90%), mark as returning, else collecting
+        if van.current_load_kg >= (van.capacity_kg * 0.9):
+            van.status = 'returning'
+        else:
+            van.status = 'collecting'
+            
         van.save()
         
         # Assign driver and update status
@@ -274,6 +306,72 @@ class WasteCollectionRequestViewSet(viewsets.ModelViewSet):
         waste_request.status = 'collected'
         waste_request.save()
         
+        # Notify the house owner
+        Notification.objects.create(
+            user=waste_request.user,
+            title="Waste Collection Accepted",
+            message=f"Your waste collection request has been accepted by Van {van.registration_number}. The driver is on their way!"
+        )
+        
+        serializer = self.get_serializer(waste_request)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def assign_van(self, request, pk=None):
+        waste_request = self.get_object()
+        
+        # Check if caller is STS Manager
+        if not hasattr(request.user, 'profile') or request.user.profile.role != 'sts_manager':
+            return Response({"error": "Only STS Managers can manually assign vans."}, status=status.HTTP_403_FORBIDDEN)
+            
+        van_id = request.data.get('van_id')
+        if not van_id:
+            return Response({"error": "van_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            van = Van.objects.get(id=van_id)
+        except Van.DoesNotExist:
+            return Response({"error": "Van not found."}, status=status.HTTP_404_NOT_FOUND)
+            
+        # Optional: check if van belongs to manager's STS. (Assuming manager has an STS relation, we could do this, but skipping strict check for hackathon speed unless needed).
+            
+        if van.trips_today >= van.max_trips_per_day:
+            return Response({"error": "Van has reached its daily trip limit."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        if van.current_load_kg + waste_request.weight > van.capacity_kg:
+            return Response({"error": "Van capacity exceeded for this request."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        if waste_request.status != 'pending':
+            return Response({"error": "This request is no longer pending."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        # Update van
+        van.current_load_kg += waste_request.weight
+        if van.current_load_kg >= (van.capacity_kg * 0.9):
+            van.status = 'returning'
+        else:
+            van.status = 'collecting'
+        van.save()
+        
+        # Assign driver and update request
+        waste_request.driver = van.driver
+        waste_request.status = 'collected'
+        waste_request.save()
+        
+        # Notify house owner
+        Notification.objects.create(
+            user=waste_request.user,
+            title="Waste Collection Scheduled",
+            message=f"Your waste collection has been manually assigned to Van {van.registration_number} by the STS Manager."
+        )
+        
+        # Notify driver
+        if van.driver:
+            Notification.objects.create(
+                user=van.driver,
+                title="New Collection Assigned",
+                message=f"STS Manager assigned you a new pickup weighing {waste_request.weight}kg."
+            )
+            
         serializer = self.get_serializer(waste_request)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -366,8 +464,9 @@ class DumpRequestViewSet(viewsets.ReadOnlyModelViewSet):
         sts.current_fill_tonnes += load_tonnes
         sts.save()
         
-        # Empty van and increment trips completed today
+        # Empty van, reset status, and increment trips completed today
         van.current_load_kg = 0.0
+        van.status = 'idle'
         van.trips_today += 1
         van.save()
         
@@ -375,4 +474,164 @@ class DumpRequestViewSet(viewsets.ReadOnlyModelViewSet):
             "message": f"Dump verified. Status: {dump_req.status}. Transferred {load_tonnes}t to STS. Van #{van.registration_number} trip #{van.trips_today} completed.",
             "status": dump_req.status
         }, status=status.HTTP_200_OK)
+
+class NotificationViewSet(viewsets.ModelViewSet):
+    """
+    A viewset for viewing and managing notifications.
+    """
+    serializer_class = NotificationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Notification.objects.filter(user=self.request.user).order_by('-created_at')
+
+    @action(detail=False, methods=['post'])
+    def mark_all_read(self, request):
+        notifications = self.get_queryset().filter(is_read=False)
+        count = notifications.update(is_read=True)
+        return Response({"message": f"{count} notifications marked as read."}, status=status.HTTP_200_OK)
+
+class WasteTransferViewSet(viewsets.ModelViewSet):
+    """
+    A viewset for managing STS to Landfill transfers.
+    """
+    queryset = WasteTransfer.objects.all()
+    serializer_class = WasteTransferSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def assign_truck(self, request, pk=None):
+        transfer = self.get_object()
+        if transfer.status != 'requested':
+            return Response({"error": "Can only assign truck to a requested transfer."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        truck_id = request.data.get('truck_id')
+        if not truck_id:
+            return Response({"error": "truck_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            truck = Truck.objects.get(id=truck_id)
+        except Truck.DoesNotExist:
+            return Response({"error": "Truck not found."}, status=status.HTTP_404_NOT_FOUND)
+            
+        if truck.capacity_tonnes < transfer.requested_tonnes:
+            return Response({"error": "Truck capacity is smaller than requested tonnes."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        if truck.hours_driven_today >= 8.0:
+            return Response({"error": "Truck has reached its 8 hour daily limit."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        transfer.truck = truck
+        transfer.status = 'truck_assigned'
+        transfer.save()
+        
+        truck.status = 'moving'
+        truck.save()
+        return Response({"message": f"Truck {truck.registration_number} assigned."}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def dispatch_truck(self, request, pk=None):
+        transfer = self.get_object()
+        if transfer.status != 'truck_assigned':
+            return Response({"error": "Can only dispatch an assigned transfer."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        weight_leaving_sts = request.data.get('weight_leaving_sts')
+        if not weight_leaving_sts:
+            return Response({"error": "weight_leaving_sts is required."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        weight_leaving_sts = float(weight_leaving_sts)
+        sts = transfer.sts
+        
+        # Subtract from STS fill
+        sts.current_fill_tonnes -= weight_leaving_sts
+        if sts.current_fill_tonnes < 0:
+            sts.current_fill_tonnes = 0
+        sts.last_collected = timezone.now()
+        sts.save()
+        
+        transfer.weight_leaving_sts = weight_leaving_sts
+        transfer.status = 'in_transit'
+        transfer.departure_time = timezone.now()
+        transfer.save()
+        
+        truck = transfer.truck
+        truck.status = 'returning'
+        truck.current_load_tonnes = weight_leaving_sts
+        truck.save()
+        
+        return Response({"message": f"Truck dispatched with {weight_leaving_sts}t. STS fill is now {sts.current_fill_tonnes}t."}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def receive_truck(self, request, pk=None):
+        transfer = self.get_object()
+        if transfer.status != 'in_transit':
+            return Response({"error": "Can only receive an in_transit transfer."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        weight_arriving_landfill = request.data.get('weight_arriving_landfill')
+        if not weight_arriving_landfill:
+            return Response({"error": "weight_arriving_landfill is required."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        weight_arriving_landfill = float(weight_arriving_landfill)
+        transfer.weight_arriving_landfill = weight_arriving_landfill
+        transfer.arrival_time = timezone.now()
+        
+        # Check discrepancy
+        if abs(transfer.weight_leaving_sts - weight_arriving_landfill) > 0.5: # 500kg tolerance for big trucks
+            transfer.status = 'flagged'
+        else:
+            transfer.status = 'received'
+            
+        transfer.save()
+        
+        # Assuming a flat 2 hours per trip for this hackathon
+        truck = transfer.truck
+        truck.hours_driven_today += 2.0 
+        truck.status = 'idle'
+        truck.current_load_tonnes = 0.0
+        truck.save()
+        
+        return Response({"message": f"Truck received. Status: {transfer.status}."}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], permission_classes=[permissions.IsAuthenticated])
+    def suggest_trucks(self, request, pk=None):
+        transfer = self.get_object()
+        sts = transfer.sts
+        
+        # 1. Fetch all trucks
+        all_trucks = Truck.objects.all()
+        suggestions = []
+        
+        for truck in all_trucks:
+            # 2. Check if truck can carry the requested weight
+            if truck.capacity_tonnes < transfer.requested_tonnes:
+                continue
+                
+            # 3. Check driving hours (assume this trip takes 2 hours)
+            if truck.hours_driven_today + 2.0 > 8.0:
+                continue
+                
+            # 4. Calculate Distance from Landfill to STS (Haversine)
+            # using the existing haversine function from views.py
+            distance_km = haversine(sts.latitude, sts.longitude, truck.landfill.latitude, truck.landfill.longitude)
+            
+            # 5. Calculate Fuel Cost
+            # Empty trip to STS
+            fuel_empty = distance_km * truck.base_fuel_cost_per_km
+            # Loaded trip back
+            fuel_loaded = distance_km * (truck.base_fuel_cost_per_km + (truck.load_fuel_penalty * transfer.requested_tonnes))
+            total_fuel = fuel_empty + fuel_loaded
+            
+            suggestions.append({
+                "truck_id": truck.id,
+                "registration_number": truck.registration_number,
+                "capacity_tonnes": truck.capacity_tonnes,
+                "status": truck.status,
+                "hours_driven_today": truck.hours_driven_today,
+                "distance_km": round(distance_km, 2),
+                "estimated_fuel_liters": round(total_fuel, 2)
+            })
+            
+        # Sort by fuel efficiency (lowest fuel first)
+        suggestions.sort(key=lambda x: x['estimated_fuel_liters'])
+        
+        return Response(suggestions, status=status.HTTP_200_OK)
 

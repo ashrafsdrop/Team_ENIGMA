@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Item, ItemImage, Profile, WasteCollectionRequest, WasteType, STS, Van, DumpRequest
+from .models import Item, ItemImage, Profile, WasteCollectionRequest, WasteType, STS, Van, DumpRequest, Notification, Area, WasteTransfer
 from django.contrib.auth.models import User
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -67,20 +67,40 @@ class WasteTypeSerializer(serializers.ModelSerializer):
         model = WasteType
         fields = '__all__'
 
+class AreaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Area
+        fields = '__all__'
+
 class WasteCollectionRequestSerializer(serializers.ModelSerializer):
     user = serializers.ReadOnlyField(source='user.username')
     driver = serializers.ReadOnlyField(source='driver.username')
     waste_type_details = WasteTypeSerializer(source='waste_type', read_only=True)
+    area_details = AreaSerializer(source='area', read_only=True)
 
     class Meta:
         model = WasteCollectionRequest
-        fields = ['id', 'user', 'waste_type', 'waste_type_details', 'weight', 'description', 'latitude', 'longitude', 'driver', 'image', 'status', 'created_at', 'updated_at']
+        fields = ['id', 'user', 'waste_type', 'waste_type_details', 'weight', 'description', 'latitude', 'longitude', 'area', 'area_details', 'driver', 'image', 'status', 'created_at', 'updated_at']
         read_only_fields = ['description', 'driver', 'status', 'created_at', 'updated_at']
 
+class VanSimpleSerializer(serializers.ModelSerializer):
+    driver_name = serializers.ReadOnlyField(source='driver.username')
+    class Meta:
+        model = Van
+        fields = ['id', 'registration_number', 'capacity_kg', 'current_load_kg', 'status', 'trips_today', 'driver_name']
+
 class STSSerializer(serializers.ModelSerializer):
+    area_details = AreaSerializer(source='area', read_only=True)
+    vans = VanSimpleSerializer(many=True, read_only=True)
+    has_pending_requests = serializers.SerializerMethodField()
+
     class Meta:
         model = STS
         fields = '__all__'
+
+    def get_has_pending_requests(self, obj):
+        # Returns True if this STS has any active transfer requests to the landfill
+        return obj.waste_transfers.filter(status='requested').exists()
 
 class VanSerializer(serializers.ModelSerializer):
     sts_details = STSSerializer(source='sts', read_only=True)
@@ -96,3 +116,15 @@ class DumpRequestSerializer(serializers.ModelSerializer):
         model = DumpRequest
         fields = '__all__'
         read_only_fields = ['van', 'sts', 'declared_weight_kg', 'status', 'created_at']
+
+class NotificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Notification
+        fields = '__all__'
+        read_only_fields = ['user', 'created_at']
+
+class WasteTransferSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WasteTransfer
+        fields = '__all__'
+        read_only_fields = ['status', 'created_at']
