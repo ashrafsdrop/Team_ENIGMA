@@ -170,7 +170,7 @@ function Hero() {
             Get started <ArrowRight className="h-4 w-4" />
           </Link>
           <Link
-            href="/admin"
+            href="#roles"
             className="inline-flex items-center gap-2 rounded-full border border-border bg-secondary/60 px-7 py-3 text-sm font-semibold transition-colors hover:bg-secondary"
           >
             <Building2 className="h-4 w-4" /> Open a dashboard
