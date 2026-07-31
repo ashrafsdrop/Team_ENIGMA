@@ -1,6 +1,17 @@
 from rest_framework import serializers
-from .models import Item, ItemImage, Profile, WasteCollectionRequest, WasteType, STS, Van, DumpRequest, Notification, Area, WasteTransfer
+from .models import Item, ItemImage, Profile, WasteCollectionRequest, WasteType, STS, Van, DumpRequest, Notification, Area, WasteTransfer, Truck, Landfill
 from django.contrib.auth.models import User
+
+class SimpleUserSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'full_name']
+
+    def get_full_name(self, obj):
+        name = obj.get_full_name()
+        return name if name else obj.username
 
 class RegisterSerializer(serializers.ModelSerializer):
     role = serializers.ChoiceField(choices=Profile.ROLE_CHOICES, write_only=True, required=False)
@@ -124,7 +135,45 @@ class NotificationSerializer(serializers.ModelSerializer):
         read_only_fields = ['user', 'created_at']
 
 class WasteTransferSerializer(serializers.ModelSerializer):
+    sts_name = serializers.ReadOnlyField(source='sts.name')
+    landfill_name = serializers.ReadOnlyField(source='truck.landfill.name')
+
     class Meta:
         model = WasteTransfer
         fields = '__all__'
         read_only_fields = ['status', 'created_at']
+
+class LandfillSerializer(serializers.ModelSerializer):
+    manager_name = serializers.ReadOnlyField(source='manager.username')
+
+    class Meta:
+        model = Landfill
+        fields = '__all__'
+
+class TruckSerializer(serializers.ModelSerializer):
+    driver_name = serializers.ReadOnlyField(source='driver.username')
+    landfill_name = serializers.ReadOnlyField(source='landfill.name')
+
+    class Meta:
+        model = Truck
+        fields = '__all__'
+
+
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        
+        # Add custom claims / user info to the response
+        data['user_id'] = self.user.id
+        data['username'] = self.user.username
+        data['email'] = self.user.email
+        
+        # Add role if profile exists
+        if hasattr(self.user, 'profile'):
+            data['role'] = self.user.profile.role
+        else:
+            data['role'] = 'house_owner' # Default fallback
+            
+        return data

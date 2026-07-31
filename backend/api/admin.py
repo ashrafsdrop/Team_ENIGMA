@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Item, ItemImage, Profile, WasteCollectionRequest, WasteType, STS, Landfill, Van, Truck, DumpRequest
+from .models import Item, ItemImage, Profile, WasteCollectionRequest, WasteType, STS, Landfill, Van, Truck, DumpRequest, Area
 
 admin.site.register(Item)
 admin.site.register(ItemImage)
@@ -11,3 +11,4 @@ admin.site.register(Landfill)
 admin.site.register(Van)
 admin.site.register(Truck)
 admin.site.register(DumpRequest)
+admin.site.register(Area)

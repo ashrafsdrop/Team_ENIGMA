@@ -3,7 +3,9 @@
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Loader2 } from "lucide-react"
+import { ArrowLeft, Loader2, Recycle } from "lucide-react"
+import { API_BASE_URL } from "@/utils/constants"
+import { dashboardRouteForRole, setTokens, setStoredUser } from "@/utils/helpers"
 
 export default function LoginPage() {
   const [formData, setFormData] = useState({ username: "", password: "" })
@@ -17,7 +19,7 @@ export default function LoginPage() {
     setLoading(true)
 
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/auth/token/`, {
+      const res = await fetch(`${API_BASE_URL}/auth/login/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(formData),
@@ -28,11 +30,10 @@ export default function LoginPage() {
       }
 
       const data = await res.json()
-      // Store tokens
-      localStorage.setItem("access_token", data.access)
-      localStorage.setItem("refresh_token", data.refresh)
-      
-      router.push("/admin") // redirect to admin or dashboard
+      setTokens(data)
+      const userRole = data.role || "house_owner"
+      setStoredUser({ role: userRole, name: data.username || formData.username })
+      router.push(dashboardRouteForRole(userRole))
     } catch (err) {
       setError(err.message)
     } finally {
@@ -42,18 +43,20 @@ export default function LoginPage() {
 
   return (
     <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-5 py-10">
-      {/* Background decorations */}
       <div className="pointer-events-none absolute -left-24 top-24 h-80 w-80 rounded-full bg-brand/20 blur-3xl" />
       <div className="pointer-events-none absolute -right-16 bottom-24 h-80 w-80 rounded-full bg-mint/10 blur-3xl" />
-      
-      <div className="w-full max-w-md animate-floaty focus-within:[animation-play-state:paused] hover:[animation-play-state:paused]" style={{ animationDuration: '8s' }}>
+
+      <div className="w-full max-w-md animate-floaty focus-within:[animation-play-state:paused] hover:[animation-play-state:paused]" style={{ animationDuration: "8s" }}>
         <Link href="/" className="mb-6 inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground">
           <ArrowLeft className="h-4 w-4" /> Back to home
         </Link>
         <div className="ring-gradient glass rounded-[2rem] border border-border bg-card/50 p-8 shadow-2xl backdrop-blur-xl sm:p-10">
           <div className="mb-8 text-center">
+            <span className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-brand to-mint shadow-lg shadow-brand/20">
+              <Recycle className="h-6 w-6 text-white" />
+            </span>
             <h1 className="text-3xl font-extrabold tracking-tight">Welcome back</h1>
-            <p className="mt-2 text-sm text-muted-foreground">Sign in to your account to continue</p>
+            <p className="mt-2 text-sm text-muted-foreground">Sign in to your EcoNexus dashboard</p>
           </div>
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-5">
@@ -84,6 +87,7 @@ export default function LoginPage() {
                 placeholder="••••••••"
               />
             </div>
+
             <button
               type="submit"
               disabled={loading}
@@ -95,7 +99,7 @@ export default function LoginPage() {
           </form>
 
           <p className="mt-6 text-center text-sm text-muted-foreground">
-            Don't have an account?{" "}
+            Don&apos;t have an account?{" "}
             <Link href="/register" className="font-semibold text-brand transition-colors hover:text-brand/80">
               Sign up
             </Link>

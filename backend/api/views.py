@@ -4,10 +4,16 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.contrib.auth.models import User
 from django.utils import timezone
-from .models import Item, ItemImage, WasteCollectionRequest, WasteType, STS, Van, DumpRequest, Notification, Truck, WasteTransfer
-from .serializers import ItemSerializer, ItemImageSerializer, ItemImageUploadSerializer, AIRequestSerializer, RegisterSerializer, WasteCollectionRequestSerializer, WasteTypeSerializer, STSSerializer, VanSerializer, DumpRequestSerializer, NotificationSerializer, WasteTransferSerializer
+from .models import Item, ItemImage, WasteCollectionRequest, WasteType, STS, Van, DumpRequest, Notification, Truck, WasteTransfer, Landfill
+from .serializers import ItemSerializer, ItemImageSerializer, ItemImageUploadSerializer, AIRequestSerializer, RegisterSerializer, WasteCollectionRequestSerializer, WasteTypeSerializer, STSSerializer, VanSerializer, DumpRequestSerializer, NotificationSerializer, WasteTransferSerializer, TruckSerializer, LandfillSerializer
+from .serializers import SimpleUserSerializer, AreaSerializer
+from .models import Area
+from django.contrib.auth import get_user_model
+
+UserModel = get_user_model()
+from django.db.models import Q
 from drf_spectacular.utils import extend_schema, extend_schema_view
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.conf import settings
 import base64
 import json
@@ -29,6 +35,16 @@ class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     permission_classes = (permissions.AllowAny,)
     serializer_class = RegisterSerializer
+
+from rest_framework_simplejwt.views import TokenObtainPairView
+from .serializers import CustomTokenObtainPairSerializer
+
+class CustomTokenObtainPairView(TokenObtainPairView):
+    """
+    Takes a set of user credentials and returns an access and refresh JSON web
+    token pair, along with the user's role to aid frontend routing.
+    """
+    serializer_class = CustomTokenObtainPairSerializer
 
 
 class ItemViewSet(viewsets.ModelViewSet):
@@ -185,7 +201,7 @@ class WasteCollectionRequestViewSet(viewsets.ModelViewSet):
     queryset = WasteCollectionRequest.objects.all()
     serializer_class = WasteCollectionRequestSerializer
     permission_classes = [permissions.IsAuthenticated]
-    parser_classes = (MultiPartParser, FormParser)
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
 
     def perform_create(self, serializer):
         waste_request = serializer.save(user=self.request.user)
@@ -237,6 +253,11 @@ class WasteCollectionRequestViewSet(viewsets.ModelViewSet):
                 waste_request.weight = estimated_weight
                 waste_request.description = description
                 
+            except Exception as e:
+                logger.error(f"Gemini analysis failed: {e}")
+                
+        if waste_request.latitude and waste_request.longitude:
+            try:
                 # Auto-assign Area based on coordinates
                 closest_area = None
                 min_distance = float('inf')
@@ -248,9 +269,8 @@ class WasteCollectionRequestViewSet(viewsets.ModelViewSet):
                 
                 waste_request.area = closest_area
                 waste_request.save()
-                
             except Exception as e:
-                logger.error(f"Gemini analysis failed: {e}")
+                logger.error(f"Error auto-assigning area: {e}")
     
     def get_queryset(self):
         # Users can only see their own requests, unless they are admin/sts_manager etc.
@@ -287,8 +307,11 @@ class WasteCollectionRequestViewSet(viewsets.ModelViewSet):
                 "error": f"Van capacity exceeded! Capacity: {van.capacity_kg}kg, Current Load: {van.current_load_kg}kg, Waste: {waste_request.weight}kg"
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        if waste_request.status != 'pending':
-            return Response({"error": "This request is no longer pending."}, status=status.HTTP_400_BAD_REQUEST)
+        if waste_request.status != 'assigned':
+            return Response({"error": "This request must be assigned to you before collection."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if waste_request.driver != request.user:
+            return Response({"error": "This request is assigned to another driver."}, status=status.HTTP_403_FORBIDDEN)
         
         # Update van load and status
         van.current_load_kg += waste_request.weight
@@ -302,15 +325,14 @@ class WasteCollectionRequestViewSet(viewsets.ModelViewSet):
         van.save()
         
         # Assign driver and update status
-        waste_request.driver = request.user
         waste_request.status = 'collected'
         waste_request.save()
         
         # Notify the house owner
         Notification.objects.create(
             user=waste_request.user,
-            title="Waste Collection Accepted",
-            message=f"Your waste collection request has been accepted by Van {van.registration_number}. The driver is on their way!"
+            title="Waste Collected",
+            message=f"Your waste has been collected by Van {van.registration_number}!"
         )
         
         serializer = self.get_serializer(waste_request)
@@ -344,17 +366,9 @@ class WasteCollectionRequestViewSet(viewsets.ModelViewSet):
         if waste_request.status != 'pending':
             return Response({"error": "This request is no longer pending."}, status=status.HTTP_400_BAD_REQUEST)
             
-        # Update van
-        van.current_load_kg += waste_request.weight
-        if van.current_load_kg >= (van.capacity_kg * 0.9):
-            van.status = 'returning'
-        else:
-            van.status = 'collecting'
-        van.save()
-        
-        # Assign driver and update request
+        # Assign driver and update request status to 'assigned'
         waste_request.driver = van.driver
-        waste_request.status = 'collected'
+        waste_request.status = 'assigned'
         waste_request.save()
         
         # Notify house owner
@@ -375,9 +389,9 @@ class WasteCollectionRequestViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(waste_request)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-class STSViewSet(viewsets.ReadOnlyModelViewSet):
+class STSViewSet(viewsets.ModelViewSet):
     """
-    A viewset for viewing STS and running AI predictions.
+    A viewset for viewing and managing STS and running AI predictions.
     """
     queryset = STS.objects.all()
     serializer_class = STSSerializer
@@ -390,10 +404,14 @@ class STSViewSet(viewsets.ReadOnlyModelViewSet):
         # Gather live data for prompt
         active_vans = sts.vans.count()
         vans_collecting = sts.vans.filter(status='collecting').count()
-        vans_returning = sts.vans.filter(status='returning').count()
         
+        # Calculate inbound weight from returning vans in TONNES
+        returning_vans = sts.vans.filter(status='returning')
+        inbound_tonnes = sum(v.current_load_kg for v in returning_vans) / 1000.0
+        
+        # Calculate pending waste in TONNES
         pending_waste = WasteCollectionRequest.objects.filter(area=sts.area, status='pending')
-        pending_weight_kg = sum(req.weight for req in pending_waste)
+        pending_tonnes = sum(req.weight for req in pending_waste) / 1000.0
         
         prompt = f"""
         You are an intelligent logistics AI for a city waste management system. 
@@ -406,15 +424,17 @@ class STSViewSet(viewsets.ReadOnlyModelViewSet):
         
         Local Fleet Activity:
         Total Vans Assigned: {active_vans}
-        Vans currently out collecting: {vans_collecting}
-        Vans currently returning full of waste: {vans_returning}
-        Total known pending waste waiting at houses in this area: {pending_weight_kg} kg
+        Vans out collecting: {vans_collecting}
+        Inbound Waste (Vans Returning): {inbound_tonnes} tonnes
+        Pending Waste at Houses: {pending_tonnes} tonnes
         
-        Based on this live data, output a pure JSON object (no markdown formatting, no backticks, just the raw JSON string) with exactly these 4 keys:
+        Based on this live data, output a pure JSON object with exactly these 4 keys:
         - "estimated_hours_until_full" (float, estimated hours based on current load and inbound vans)
         - "should_dispatch_truck_now" (boolean, true if they should request a truck immediately to prevent overflow)
         - "recommended_truck_tonnes" (float, how many tonnes they should request to clear space)
         - "reasoning" (string, a brief 1-sentence explanation of your decision)
+        
+        Do not include any conversational text. Return ONLY the JSON.
         """
         
         try:
@@ -426,7 +446,11 @@ class STSViewSet(viewsets.ReadOnlyModelViewSet):
                 'X-goog-api-key': settings.GEMINI_API_KEY
             }
             payload = {
-                "contents": [{"parts": [{"text": prompt}]}]
+                "contents": [{"parts": [{"text": prompt}]}],
+                # Force Gemini to output JSON
+                "generationConfig": {
+                    "response_mime_type": "application/json"
+                }
             }
             
             response = requests.post(gemini_url, headers=headers, json=payload)
@@ -435,9 +459,6 @@ class STSViewSet(viewsets.ReadOnlyModelViewSet):
             response_data = response.json()
             result_text = response_data['candidates'][0]['content']['parts'][0]['text']
             
-            # Clean up markdown if Gemini ignores instructions
-            result_text = result_text.replace('```json', '').replace('```', '').strip()
-            
             prediction = json.loads(result_text)
             return Response(prediction, status=status.HTTP_200_OK)
             
@@ -445,13 +466,50 @@ class STSViewSet(viewsets.ReadOnlyModelViewSet):
             logger.error(f"Gemini Prediction Error: {e}")
             return Response({"error": "Failed to generate AI prediction."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-class VanViewSet(viewsets.ReadOnlyModelViewSet):
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def assign_manager(self, request, pk=None):
+        """Assign a manager (user) to this STS. Only area_head or admin allowed."""
+        sts = self.get_object()
+        user = request.user
+        if not hasattr(user, 'profile') or user.profile.role not in ['area_head', 'admin']:
+            return Response({"error": "Only Area Heads or Admins can assign STS managers."}, status=status.HTTP_403_FORBIDDEN)
+
+        manager_id = request.data.get('manager_id')
+        manager_username = request.data.get('manager_username')
+        if not manager_id and not manager_username:
+            return Response({"error": "manager_id or manager_username is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        mgr = None
+        if manager_id:
+            try:
+                mgr = User.objects.get(id=manager_id)
+            except User.DoesNotExist:
+                return Response({"error": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            try:
+                mgr = User.objects.get(username=manager_username)
+            except User.DoesNotExist:
+                return Response({"error": "User (by username) not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        sts.manager = mgr
+        sts.save()
+        serializer = self.get_serializer(sts)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+class VanViewSet(viewsets.ModelViewSet):
     """
-    A viewset for viewing Vans and performing actions like dumping.
+    A viewset for viewing and managing Vans and performing actions like dumping.
     """
     queryset = Van.objects.all()
     serializer_class = VanSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=False, methods=['get'], permission_classes=[permissions.IsAuthenticated])
+    def my_van(self, request):
+        if not hasattr(request.user, 'van'):
+            return Response({"error": "No van assigned to you."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = self.get_serializer(request.user.van)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def dump(self, request):
@@ -476,6 +534,36 @@ class VanViewSet(viewsets.ReadOnlyModelViewSet):
             "message": f"Dump request submitted to {sts.name}. Please wait for STS Manager verification.",
             "dump_request_id": dump_req.id
         }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def assign_sts(self, request, pk=None):
+        """Assign this van to a different STS. Only area_head or admin allowed."""
+        van = self.get_object()
+        user = request.user
+        if not hasattr(user, 'profile') or user.profile.role not in ['area_head', 'admin']:
+            return Response({"error": "Only Area Heads or Admins can reassign vans."}, status=status.HTTP_403_FORBIDDEN)
+
+        sts_id = request.data.get('sts_id')
+        sts_name = request.data.get('sts_name')
+        if not sts_id and not sts_name:
+            return Response({"error": "sts_id or sts_name is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        new_sts = None
+        if sts_id:
+            try:
+                new_sts = STS.objects.get(id=sts_id)
+            except STS.DoesNotExist:
+                return Response({"error": "STS not found."}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            try:
+                new_sts = STS.objects.get(name=sts_name)
+            except STS.DoesNotExist:
+                return Response({"error": "STS (by name) not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        van.sts = new_sts
+        van.save()
+        serializer = self.get_serializer(van)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 class DumpRequestViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -536,6 +624,64 @@ class DumpRequestViewSet(viewsets.ReadOnlyModelViewSet):
             "message": f"Dump verified. Status: {dump_req.status}. Transferred {load_tonnes}t to STS. Van #{van.registration_number} trip #{van.trips_today} completed.",
             "status": dump_req.status
         }, status=status.HTTP_200_OK)
+
+class LandfillViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    A viewset for viewing Landfills.
+    """
+    queryset = Landfill.objects.all()
+    serializer_class = LandfillSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class TruckViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    A viewset for viewing Trucks.
+    """
+    queryset = Truck.objects.all()
+    serializer_class = TruckSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=False, methods=['get'], permission_classes=[permissions.IsAuthenticated])
+    def my_truck(self, request):
+        user = request.user
+        if not hasattr(user, 'profile') or user.profile.role != 'truck_owner':
+            return Response({"error": "Only truck drivers can fetch their truck."}, status=status.HTTP_403_FORBIDDEN)
+
+        if not hasattr(user, 'truck'):
+            return Response({"error": "No truck assigned to your profile."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = self.get_serializer(user.truck)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def update_status(self, request):
+        user = request.user
+        if not hasattr(user, 'profile') or user.profile.role != 'truck_owner':
+            return Response({"error": "Only truck drivers can update truck status."}, status=status.HTTP_403_FORBIDDEN)
+
+        if not hasattr(user, 'truck'):
+            return Response({"error": "No truck assigned to your profile."}, status=status.HTTP_404_NOT_FOUND)
+
+        truck = user.truck
+        status_val = request.data.get('status')
+        hours = request.data.get('hours_driven')
+        updated = False
+        if status_val:
+            if status_val in dict(Truck.STATUS_CHOICES):
+                truck.status = status_val
+                updated = True
+        if hours is not None:
+            try:
+                h = float(hours)
+                truck.hours_driven_today = h
+                updated = True
+            except Exception:
+                pass
+
+        if updated:
+            truck.save()
+            return Response({"message": "Truck updated.", "truck": TruckSerializer(truck).data}, status=status.HTTP_200_OK)
+        return Response({"error": "No valid fields provided."}, status=status.HTTP_400_BAD_REQUEST)
 
 class NotificationViewSet(viewsets.ModelViewSet):
     """
@@ -753,4 +899,28 @@ class WasteTransferViewSet(viewsets.ModelViewSet):
             )
             
         return Response({"message": "Arrived at STS successfully. Status updated to loading."}, status=status.HTTP_200_OK)
+
+
+class AreaViewSet(viewsets.ModelViewSet):
+    """CRUD for Areas. Area Head may manage areas."""
+    queryset = Area.objects.all()
+    serializer_class = AreaSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+
+class UserViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only users endpoint. Supports filtering by role (profile.role) and search by username/email."""
+    queryset = UserModel.objects.all()
+    serializer_class = SimpleUserSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        role = self.request.query_params.get('role')
+        q = self.request.query_params.get('q')
+        if role:
+            qs = qs.filter(profile__role=role)
+        if q:
+            qs = qs.filter(Q(username__icontains=q) | Q(email__icontains=q) | Q(first_name__icontains=q) | Q(last_name__icontains=q))
+        return qs
 

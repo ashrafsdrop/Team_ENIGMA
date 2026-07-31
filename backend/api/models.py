@@ -113,7 +113,8 @@ class Truck(models.Model):
 
 class WasteCollectionRequest(models.Model):
     STATUS_CHOICES = (
-        ('pending', 'Pending'),
+        ('pending', 'Pending (Awaiting STS Assignment)'),
+        ('assigned', 'Assigned (Van En Route)'),
         ('collected', 'Collected'),
     )
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='waste_requests')
